@@ -1,0 +1,165 @@
+"""
+Modelos de Estoque.
+"""
+from datetime import datetime, date
+from enum import Enum
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from database import Base
+
+
+class TipoMovimentacao(str, Enum):
+    """Tipos de movimentação de estoque."""
+    ENTRADA = "ENTRADA"
+    SAIDA = "SAIDA"
+    AJUSTE = "AJUSTE"
+    DEVOLUCAO = "DEVOLUCAO"
+    PERDA = "PERDA"
+    TRANSFERENCIA = "TRANSFERENCIA"
+
+
+class StatusLote(str, Enum):
+    """Status do lote."""
+    ATIVO = "ATIVO"
+    VENCIDO = "VENCIDO"
+    BLOQUEADO = "BLOQUEADO"
+
+
+class Estoque(Base):
+    """
+    Modelo de Estoque.
+    Controla a quantidade disponível de cada produto/variante.
+    """
+    __tablename__ = "estoque"
+
+    id = Column(Integer, primary_key=True, index=True)
+    produto_id = Column(Integer, nullable=False, index=True)
+    variante_id = Column(Integer, nullable=True, index=True)
+    
+    quantidade = Column(Float, nullable=False, default=0.0)
+    quantidade_reservada = Column(Float, nullable=False, default=0.0)
+    quantidade_disponivel = Column(Float, nullable=False, default=0.0)
+    
+    estoque_minimo = Column(Float, nullable=False, default=0.0)
+    estoque_maximo = Column(Float, nullable=True)
+    
+    localizacao = Column(String(100), nullable=True)  # Ex: "Prateleira A1"
+    
+    ativo = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relacionamentos
+    movimentacoes = relationship("Movimentacao", back_populates="estoque", cascade="all, delete-orphan")
+    lotes = relationship("Lote", back_populates="estoque", cascade="all, delete-orphan")
+
+
+class Movimentacao(Base):
+    """
+    Modelo de Movimentação de Estoque.
+    Registra todas as entradas e saídas de estoque.
+    """
+    __tablename__ = "movimentacoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    estoque_id = Column(Integer, ForeignKey("estoque.id"), nullable=False, index=True)
+    lote_id = Column(Integer, ForeignKey("lotes.id"), nullable=True, index=True)
+    
+    tipo = Column(String(20), nullable=False, index=True)  # TipoMovimentacao
+    quantidade = Column(Float, nullable=False)
+    quantidade_anterior = Column(Float, nullable=False)
+    quantidade_posterior = Column(Float, nullable=False)
+    
+    motivo = Column(String(200), nullable=True)
+    observacao = Column(Text, nullable=True)
+    
+    documento = Column(String(100), nullable=True)  # Número da NF, pedido, etc.
+    usuario_id = Column(Integer, nullable=True)  # ID do usuário que fez a movimentação
+    
+    custo_unitario = Column(Float, nullable=True)
+    custo_total = Column(Float, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    
+    # Relacionamentos
+    estoque = relationship("Estoque", back_populates="movimentacoes")
+    lote = relationship("Lote", back_populates="movimentacoes")
+
+
+class Lote(Base):
+    """
+    Modelo de Lote.
+    Controla lotes de produtos com data de validade.
+    """
+    __tablename__ = "lotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    estoque_id = Column(Integer, ForeignKey("estoque.id"), nullable=False, index=True)
+    
+    codigo = Column(String(100), nullable=False, unique=True, index=True)
+    quantidade = Column(Float, nullable=False, default=0.0)
+    quantidade_inicial = Column(Float, nullable=False)
+    
+    data_fabricacao = Column(Date, nullable=True)
+    data_validade = Column(Date, nullable=True, index=True)
+    
+    fornecedor = Column(String(200), nullable=True)
+    nota_fiscal = Column(String(100), nullable=True)
+    
+    custo_unitario = Column(Float, nullable=True)
+    
+    status = Column(String(20), nullable=False, default=StatusLote.ATIVO.value, index=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relacionamentos
+    estoque = relationship("Estoque", back_populates="lotes")
+    movimentacoes = relationship("Movimentacao", back_populates="lote")
+
+
+class Inventario(Base):
+    """
+    Modelo de Inventário.
+    Registra contagens físicas de estoque.
+    """
+    __tablename__ = "inventarios"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    data_inventario = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    responsavel = Column(String(200), nullable=False)
+    observacao = Column(Text, nullable=True)
+    
+    finalizado = Column(Boolean, default=False, nullable=False)
+    data_finalizacao = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relacionamentos
+    itens = relationship("ItemInventario", back_populates="inventario", cascade="all, delete-orphan")
+
+
+class ItemInventario(Base):
+    """
+    Modelo de Item de Inventário.
+    Registra a contagem de cada produto no inventário.
+    """
+    __tablename__ = "itens_inventario"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inventario_id = Column(Integer, ForeignKey("inventarios.id"), nullable=False, index=True)
+    estoque_id = Column(Integer, ForeignKey("estoque.id"), nullable=False, index=True)
+    
+    quantidade_sistema = Column(Float, nullable=False)
+    quantidade_contada = Column(Float, nullable=False)
+    diferenca = Column(Float, nullable=False)
+    
+    observacao = Column(Text, nullable=True)
+    ajustado = Column(Boolean, default=False, nullable=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relacionamentos
+    inventario = relationship("Inventario", back_populates="itens")

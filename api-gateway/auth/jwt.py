@@ -1,0 +1,88 @@
+"""
+Utilitários para geração e validação de tokens JWT.
+"""
+from datetime import datetime, timedelta
+from typing import Any
+from uuid import UUID
+from jose import JWTError, jwt
+from config import settings
+from models.usuario import RoleEnum
+
+
+def create_access_token(user_id: UUID, role: RoleEnum) -> str:
+    """
+    Cria um access token JWT.
+    
+    Args:
+        user_id: ID do usuário
+        role: Role do usuário
+        
+    Returns:
+        Token JWT codificado
+    """
+    now = datetime.utcnow()
+    expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    payload = {
+        "sub": str(user_id),
+        "role": role.value,
+        "exp": int(expire.timestamp()),
+        "iat": int(now.timestamp())
+    }
+    
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_refresh_token(user_id: UUID) -> str:
+    """
+    Cria um refresh token JWT.
+    
+    Args:
+        user_id: ID do usuário
+        
+    Returns:
+        Refresh token JWT codificado
+    """
+    now = datetime.utcnow()
+    expire = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    
+    payload = {
+        "sub": str(user_id),
+        "type": "refresh",
+        "exp": int(expire.timestamp()),
+        "iat": int(now.timestamp())
+    }
+    
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_token(token: str) -> dict[str, Any]:
+    """
+    Decodifica e valida um token JWT.
+    
+    Args:
+        token: Token JWT
+        
+    Returns:
+        Payload do token
+        
+    Raises:
+        JWTError: Se o token for inválido
+    """
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+
+def verify_token(token: str) -> dict[str, Any] | None:
+    """
+    Verifica se um token é válido.
+    
+    Args:
+        token: Token JWT
+        
+    Returns:
+        Payload do token se válido, None caso contrário
+    """
+    try:
+        return decode_token(token)
+    except JWTError:
+        return None

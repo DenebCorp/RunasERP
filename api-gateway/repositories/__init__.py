@@ -1,0 +1,1 @@
+"""Repositories do API Gateway."""

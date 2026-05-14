@@ -1,0 +1,303 @@
+"""
+Service de Cliente com regras de negócio.
+"""
+from uuid import UUID
+from decimal import Decimal
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException, status
+import structlog
+
+from repositories.cliente_repository import ClienteRepository, EnderecoRepository
+from schemas.cliente import (
+    ClienteCreate,
+    ClienteUpdate,
+    CreditoUpdate,
+    CreditoDelta,
+    EnderecoCreate,
+    EnderecoUpdate
+)
+from models.cliente import Cliente, Endereco
+
+log = structlog.get_logger()
+
+
+class ClienteService:
+    """Service de Cliente."""
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.cliente_repo = ClienteRepository(db)
+        self.endereco_repo = EnderecoRepository(db)
+    
+    async def criar_cliente(self, data: ClienteCreate) -> Cliente:
+        """
+        Cria um novo cliente.
+        
+        Regras:
+        - CPF deve ser único
+        - CPF já validado no schema
+        - Telefone já normalizado no schema
+        """
+        # Verificar se CPF já existe
+        cliente_existente = await self.cliente_repo.buscar_por_cpf(data.cpf)
+        if cliente_existente:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="CPF já cadastrado"
+            )
+        
+        cliente = await self.cliente_repo.criar(data)
+        log.info("cliente.criado", cliente_id=str(cliente.id), cpf=data.cpf)
+        return cliente
+    
+    async def buscar_cliente(self, cliente_id: UUID) -> Cliente:
+        """Busca cliente por ID."""
+        cliente = await self.cliente_repo.buscar_por_id(cliente_id)
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        return cliente
+    
+    async def buscar_por_cpf(self, cpf: str) -> Cliente:
+        """Busca cliente por CPF."""
+        cliente = await self.cliente_repo.buscar_por_cpf(cpf)
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        return cliente
+    
+    async def listar_clientes(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        nome: str | None = None,
+        cpf: str | None = None,
+        bloqueado: bool | None = None
+    ) -> tuple[list[Cliente], int]:
+        """Lista clientes com filtros."""
+        return await self.cliente_repo.listar(skip, limit, nome, cpf, bloqueado)
+    
+    async def atualizar_cliente(
+        self,
+        cliente_id: UUID,
+        data: ClienteUpdate
+    ) -> Cliente:
+        """Atualiza dados do cliente."""
+        cliente = await self.cliente_repo.atualizar(cliente_id, data)
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        return cliente
+    
+    async def desativar_cliente(self, cliente_id: UUID) -> None:
+        """
+        Desativa um cliente (soft delete).
+        
+        Regras:
+        - Não pode desativar se tiver pedidos em aberto
+        - Não pode desativar se tiver contas pendentes
+        """
+        cliente = await self.buscar_cliente(cliente_id)
+        
+        # TODO: Verificar pedidos em aberto (integração com serviço de vendas)
+        # TODO: Verificar contas pendentes (integração com serviço financeiro)
+        
+        sucesso = await self.cliente_repo.soft_delete(cliente_id)
+        if not sucesso:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Erro ao desativar cliente"
+            )
+        
+        log.info("cliente.desativado", cliente_id=str(cliente_id))
+    
+    async def definir_credito(
+        self,
+        cliente_id: UUID,
+        data: CreditoUpdate
+    ) -> Cliente:
+        """
+        Define limite de crédito e dia de vencimento.
+        
+        Regras:
+        - limite_credito >= 0
+        - dia_vencimento entre 1 e 28
+        - credito_disponivel = limite_credito - saldo_devedor
+        """
+        cliente = await self.buscar_cliente(cliente_id)
+        
+        # TODO: Buscar saldo devedor do serviço financeiro
+        saldo_devedor = Decimal("0.00")  # Por enquanto
+        
+        cliente_atualizado = await self.cliente_repo.atualizar_credito(
+            cliente_id,
+            data.limite_credito,
+            data.dia_vencimento
+        )
+        
+        if not cliente_atualizado:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        
+        log.info(
+            "cliente.credito_definido",
+            cliente_id=str(cliente_id),
+            limite=str(data.limite_credito)
+        )
+        
+        return cliente_atualizado
+    
+    async def ajustar_credito(
+        self,
+        cliente_id: UUID,
+        delta: Decimal
+    ) -> Cliente:
+        """
+        Ajusta crédito disponível.
+        
+        Args:
+            cliente_id: ID do cliente
+            delta: Valor a ajustar (positivo = crédito, negativo = débito)
+            
+        Regras:
+        - credito_disponivel nunca pode ser negativo
+        """
+        cliente = await self.buscar_cliente(cliente_id)
+        
+        try:
+            cliente_atualizado = await self.cliente_repo.ajustar_credito_disponivel(
+                cliente_id,
+                delta
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
+        
+        if not cliente_atualizado:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        
+        log.info(
+            "cliente.credito_ajustado",
+            cliente_id=str(cliente_id),
+            delta=str(delta)
+        )
+        
+        return cliente_atualizado
+    
+    async def bloquear_cliente(self, cliente_id: UUID) -> Cliente:
+        """
+        Bloqueia um cliente manualmente.
+        
+        Regras:
+        - Cliente bloqueado não pode fazer compras fiadas
+        """
+        cliente = await self.cliente_repo.bloquear(cliente_id)
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        
+        log.warning("cliente.bloqueado_manual", cliente_id=str(cliente_id))
+        return cliente
+    
+    async def desbloquear_cliente(self, cliente_id: UUID) -> Cliente:
+        """Desbloqueia um cliente."""
+        cliente = await self.cliente_repo.desbloquear(cliente_id)
+        if not cliente:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cliente não encontrado"
+            )
+        
+        log.info("cliente.desbloqueado", cliente_id=str(cliente_id))
+        return cliente
+    
+    # Métodos de Endereço
+    
+    async def adicionar_endereco(
+        self,
+        cliente_id: UUID,
+        data: EnderecoCreate
+    ) -> Endereco:
+        """Adiciona um endereço ao cliente."""
+        # Verificar se cliente existe
+        await self.buscar_cliente(cliente_id)
+        
+        endereco = await self.endereco_repo.criar(cliente_id, data)
+        log.info("endereco.criado", cliente_id=str(cliente_id), endereco_id=str(endereco.id))
+        return endereco
+    
+    async def listar_enderecos(self, cliente_id: UUID) -> list[Endereco]:
+        """Lista endereços de um cliente."""
+        # Verificar se cliente existe
+        await self.buscar_cliente(cliente_id)
+        
+        return await self.endereco_repo.listar_por_cliente(cliente_id)
+    
+    async def atualizar_endereco(
+        self,
+        cliente_id: UUID,
+        endereco_id: UUID,
+        data: EnderecoUpdate
+    ) -> Endereco:
+        """Atualiza um endereço."""
+        # Verificar se cliente existe
+        await self.buscar_cliente(cliente_id)
+        
+        # Verificar se endereço pertence ao cliente
+        endereco = await self.endereco_repo.buscar_por_id(endereco_id)
+        if not endereco or endereco.cliente_id != cliente_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Endereço não encontrado"
+            )
+        
+        endereco_atualizado = await self.endereco_repo.atualizar(endereco_id, data)
+        if not endereco_atualizado:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Endereço não encontrado"
+            )
+        
+        log.info("endereco.atualizado", endereco_id=str(endereco_id))
+        return endereco_atualizado
+    
+    async def remover_endereco(
+        self,
+        cliente_id: UUID,
+        endereco_id: UUID
+    ) -> None:
+        """Remove um endereço."""
+        # Verificar se cliente existe
+        await self.buscar_cliente(cliente_id)
+        
+        # Verificar se endereço pertence ao cliente
+        endereco = await self.endereco_repo.buscar_por_id(endereco_id)
+        if not endereco or endereco.cliente_id != cliente_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Endereço não encontrado"
+            )
+        
+        sucesso = await self.endereco_repo.deletar(endereco_id)
+        if not sucesso:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Erro ao remover endereço"
+            )
+        
+        log.info("endereco.removido", endereco_id=str(endereco_id))

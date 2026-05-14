@@ -1,0 +1,135 @@
+"""
+Configuração OAuth2 e dependências de autenticação.
+"""
+from typing import Annotated
+from uuid import UUID
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from redis.asyncio import Redis
+from database import get_db
+from repositories.usuario_repository import UsuarioRepository
+from auth.jwt import verify_token
+from models.usuario import Usuario, RoleEnum
+from auth.redis_client import get_redis
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+async def get_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)]
+) -> Usuario:
+    """
+    Obtém o usuário atual a partir do token JWT.
+    
+    Args:
+        token: Token JWT
+        db: Sessão do banco de dados
+        redis: Cliente Redis
+        
+    Returns:
+        Usuário autenticado
+        
+    Raises:
+        HTTPException: Se o token for inválido ou usuário não encontrado
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciais inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    # Verificar se token está na blacklist
+    is_blacklisted = await redis.get(f"blacklist:{token}")
+    if is_blacklisted:
+        raise credentials_exception
+    
+    # Decodificar token
+    payload = verify_token(token)
+    if payload is None:
+        raise credentials_exception
+    
+    user_id: str | None = payload.get("sub")
+    if user_id is None:
+        raise credentials_exception
+    
+    # Buscar usuário no banco
+    repo = UsuarioRepository(db)
+    usuario = await repo.buscar_por_id(UUID(user_id))
+    
+    if usuario is None or not usuario.ativo:
+        raise credentials_exception
+    
+    return usuario
+
+
+async def get_current_active_user(
+    current_user: Annotated[Usuario, Depends(get_current_user)]
+) -> Usuario:
+    """
+    Verifica se o usuário está ativo.
+    
+    Args:
+        current_user: Usuário atual
+        
+    Returns:
+        Usuário ativo
+        
+    Raises:
+        HTTPException: Se o usuário estiver inativo
+    """
+    if not current_user.ativo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuário inativo"
+        )
+    return current_user
+
+
+async def require_admin(
+    current_user: Annotated[Usuario, Depends(get_current_active_user)]
+) -> Usuario:
+    """
+    Verifica se o usuário tem role ADMIN.
+    
+    Args:
+        current_user: Usuário atual
+        
+    Returns:
+        Usuário admin
+        
+    Raises:
+        HTTPException: Se o usuário não for admin
+    """
+    if current_user.role != RoleEnum.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acesso negado: apenas administradores"
+        )
+    return current_user
+
+
+async def require_admin_or_operador(
+    current_user: Annotated[Usuario, Depends(get_current_active_user)]
+) -> Usuario:
+    """
+    Verifica se o usuário tem role ADMIN ou OPERADOR.
+    
+    Args:
+        current_user: Usuário atual
+        
+    Returns:
+        Usuário autenticado
+        
+    Raises:
+        HTTPException: Se o usuário não tiver permissão
+    """
+    if current_user.role not in [RoleEnum.ADMIN, RoleEnum.OPERADOR]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acesso negado"
+        )
+    return current_user
